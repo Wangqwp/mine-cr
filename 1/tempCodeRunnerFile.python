@@ -1,0 +1,170 @@
+# def qiuzhi(i):
+#     iu=1
+#     now=2
+#     sum=0
+#     if i==1:
+#         return 1
+#     else:
+#         while iu+now<i:
+#             iu+=now
+#             now+=1
+#         sum+=(now*(now-1)*(now+1))/6
+#         sum+=(i-iu+1)*(i-iu)/2
+#     return sum
+# t=int(input())
+# l=[[] for _ in range(t)]
+# ma=1
+# for i in range(t):
+#     po=list(map(int,input().split()))
+#     ma=max(max(po[0],po[1]),ma)
+#     l[i]=po
+# for x,y in l:
+#     tre=qiuzhi(y)-qiuzhi(x)
+#     print(tre)
+
+
+# import sys
+# input=sys.stdin.readline()
+# n=int(input())
+# l=[[] for i in range(n)]
+# sum=0
+# for i in range(n):
+#     lp=list(map(int,input().split()))
+#     lo=[]
+#     lo.append((lp[0]+lp[1])/1000)
+#     lo.append(lp[2]/1000)
+#     sum+=(lp[0]+lp[1])/1000
+#     sum+=lp[2]/1000
+#     l[i]=lo
+# l.sort(key=lambda x:x[0])
+# sum-=l[-1][1]
+# print(sum*1000)
+
+# import sys
+# import math
+
+# input = sys.stdin.readline
+
+# n, m = map(int, input().split())
+# ln = [0] + list(map(int, input().split()))
+
+# def bian(n):
+#     res = math.log2(n)
+#     res = math.floor(res)
+#     return res + 1
+
+# print(bian(3), bian(4))
+
+
+# import sys
+
+# input = sys.stdin.readline
+
+# n, m = map(int, input().split())
+
+# a = [0] + list(map(int, input().split()))
+
+# s = sum(a)
+
+# fa = list(range(n + 2))
+
+# def find(x):
+#     while fa[x] != x:
+#         fa[x] = fa[fa[x]]
+#         x = fa[x]
+#     return x
+
+# for i in range(1, n + 1):
+#     if a[i] <= 2:
+#         fa[i] = i + 1
+
+# for _ in range(m):
+#     l, r = map(int, input().split())
+
+#     p = find(l)
+
+#     while p <= r:
+#         old = a[p]
+
+#         a[p] = a[p].bit_length()
+
+#         s += a[p] - old
+
+#         if a[p] <= 2:
+#             fa[p] = p + 1
+
+#         p = find(p + 1)
+
+#     print(s)
+
+# import sys
+# input = sys.stdin.readline
+
+# MOD = 1_000_000_007
+
+# def solve():
+#     n = int(input())
+#     k = 0  # DELETE 操作数 = 配对数
+#     for _ in range(n):
+#         line = input().split()
+#         if line[0] == 'DELETE':
+#             k += 1
+    
+#     # 答案 = n! * inv(2)^k mod MOD
+#     fact = 1
+#     for i in range(1, n + 1):
+#         fact = fact * i % MOD
+    
+#     # inv(2) = (MOD+1)//2
+#     inv2 = (MOD + 1) // 2
+#     ans = fact * pow(inv2, k, MOD) % MOD
+#     print(ans)
+
+# solve()
+
+# n=int(input())
+# lis=[2,3,6]
+# res=1
+# while len(lis)<n:
+#     lis.append(lis[-1]*lis[-2]% 998244353 )
+# if n==1:
+#     print(2)
+# if n==2:
+#     print(6)
+# if n==3 :
+#     print(36)
+# else:
+#     for i in lis:
+#         res=res*i% 998244353 
+#     print(res)
+
+def isshu(s):
+    g = s % 10
+    s //= 10
+
+    while s > 0:
+        l = s % 10
+
+        # 奇偶相同
+        if g % 2 == l % 2:
+            return False
+
+        g = l
+        s //= 10
+
+    return True
+
+
+lis = [10]
+q = 11
+
+n = int(input())
+
+while n > len(lis):
+    while not isshu(q):
+        q += 1
+
+    lis.append(q)
+    q += 1
+
+print(lis[-1])

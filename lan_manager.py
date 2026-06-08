@@ -135,6 +135,17 @@ def resolve_hostname(ip):
     return None
 
 
+def resolve_hostname_with_timeout(ip, timeout=2):
+    """带超时的 hostname 解析，防止单卡死"""
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(resolve_hostname, ip)
+        try:
+            return fut.result(timeout=timeout)
+        except:
+            return None
+
+
 def lookup_oui(mac):
     """根据 MAC 前缀查厂商"""
     if not mac or mac == "00:00:00:00:00:00":
@@ -412,15 +423,29 @@ def scan_network():
     local_ip = get_local_ip()
     all_devices = [d for d in all_devices if d["ip"] != local_ip]
 
-    # 第三步：解析主机名和厂商
-    print("\n[3/3] 解析设备信息...")
-    for i, dev in enumerate(all_devices):
-        name = resolve_hostname(dev["ip"])
-        vendor = lookup_oui(dev["mac"]) if dev["mac"] else None
+    # 第三步：解析主机名和厂商（并发解析）
+    print(f"\n[3/3] 解析 {len(all_devices)} 台设备信息...")
+    import concurrent.futures
+
+    def resolve_device(dev_tuple):
+        i, dev = dev_tuple
+        name = resolve_hostname_with_timeout(dev["ip"])
+        vendor = lookup_oui(dev["mac"]) if dev.get("mac") else None
         dev["name"] = name or (f"设备{i+1}" if not vendor else vendor)
         dev["vendor"] = vendor or "未知"
         if dev["mac"] and not vendor:
             dev["vendor"] = "其他"
+        return i
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(resolve_device, (i, dev))
+                   for i, dev in enumerate(all_devices)}
+        done = 0
+        for future in concurrent.futures.as_completed(futures):
+            done += 1
+            if done % 10 == 0 or done == len(all_devices):
+                print(f"  → {done}/{len(all_devices)}", end="\r", flush=True)
+    print()
 
     # 显示结果
     print("\n" + "=" * 65)

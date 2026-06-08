@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""
+校园网自动登录 & 保持在线工具
+支持命令行参数、守护模式、定时检测、自动重连
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import requests
+
+# ---------- 默认配置 ----------
+DEFAULT_AUTH_URL = "http://10.9.1.3"
+CONFIG_FILE = Path(__file__).parent / "campus_config.json"
+DEFAULT_CONFIG = {
+    "username": "2412410023",
+    "password": "070121wang",
+    "auth_url": "http://10.9.1.3",
+    "operator": "中国移动",
+    "check_interval": 60,
+    "timeout": 10,
+}
+
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+})
+
+
+# ═══════════════════════════════════════
+#  工具函数
+# ═══════════════════════════════════════
+
+def log(msg: str):
+    """带时间戳的日志输出"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}")
+
+
+def load_config() -> dict:
+    """加载或创建配置文件"""
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return {**DEFAULT_CONFIG, **cfg}
+    # 首次运行，写入默认配置（含用户提供的账号信息）
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+    log(f"配置文件已创建: {CONFIG_FILE}")
+    return dict(DEFAULT_CONFIG)
+
+
+def save_config(config: dict):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+# ═══════════════════════════════════════
+#  网络检测
+# ═══════════════════════════════════════
+
+def is_online() -> bool:
+    """检测是否已连上外网"""
+    for url in ["http://www.baidu.com", "http://www.qq.com", "http://www.sina.com.cn"]:
+        try:
+            r = SESSION.get(url, timeout=5)
+            if r.status_code == 200:
+                # 如果被重定向到内网IP说明未登录
+                final_url = r.url.lower()
+                if any(final_url.startswith(p) for p in ["http://10.", "http://172.", "http://192.168."]):
+                    return False
+                return True
+        except requests.RequestException:
+            continue
+    return False
+
+
+def fetch_auth_page(target_url: str):
+    """
+    优先直接访问目标URL获取认证页面；若失败则尝试外网重定向检测
+    返回: (auth_page_url, html_content, auth_type)
+    """
+    # 优先直接访问指定的认证地址
+    try:
+        r = SESSION.get(target_url, timeout=8)
+        if r.status_code == 200 and len(r.text) > 100:
+            text_lower = r.text.lower()
+            if any(kw in text_lower for kw in ["login", "认证", "portal", "auth", "username", "password"]):
+                auth_type = detect_auth_type(r.url, r.text)
+                log(f"认证页面: {r.url}  (类型: {auth_type})")
+                return r.url, r.text, auth_type
+    except requests.RequestException:
+        pass
+
+    # 备用：访问外网看是否重定向
+    try:
+        r = SESSION.get("http://www.baidu.com", timeout=8, allow_redirects=True)
+        if r.url and not r.url.startswith(("http://www.baidu", "https://www.baidu")):
+            auth_type = detect_auth_type(r.url, r.text)
+            log(f"重定向到认证页面: {r.url}  (类型: {auth_type})")
+            return r.url, r.text, auth_type
+    except requests.RequestException:
+        pass
+
+    return None, "", "unknown"
+
+
+def detect_auth_type(url: str, html: str) -> str:
+    """检测认证系统类型"""
+    t = (url + " " + html).lower()
+    if "drcom" in t or "dr.com" in t: return "drcom"
+    if "ruijie" in t: return "ruijie"
+    if "eportal" in t: return "eportal"
+    if "portal" in t: return "portal"
+    if "h3c" in t or "inode" in t: return "h3c"
+    return "generic"
+
+
+# ═══════════════════════════════════════
+#  HTML 解析工具
+# ═══════════════════════════════════════
+
+def find_action_url(page_url: str, html: str) -> str | None:
+    m = re.search(r'<form[^>]*\s+action=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if not m:
+        return None
+    action = m.group(1)
+    if action.startswith("http"):
+        return action
+    parsed = urlparse(page_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    if action.startswith("/"):
+        return base + action
+    path = parsed.path.rstrip("/")
+    if "/" in path:
+        return base + path[:path.rfind("/")] + "/" + action
+    return base + "/" + action
+
+
+def find_field(html: str, indicators: list[str], default: str) -> str:
+    for inp in re.findall(r'<input[^>]*>', html):
+        nm = re.search(r'name=["\']([^"\']+)["\']', inp)
+        if nm and any(ind in nm.group(1).lower() for ind in indicators):
+            return nm.group(1)
+    return default
+
+
+def extract_hidden_fields(html: str) -> dict:
+    fields = {}
+    for inp in re.findall(r'<input[^>]*>', html):
+        nm = re.search(r'name=["\']([^"\']+)["\']', inp)
+        vl = re.search(r'value=["\']([^"\']*)["\']', inp)
+        if nm:
+            fields[nm.group(1)] = vl.group(1) if vl else ""
+    return fields
+
+
+# ═══════════════════════════════════════
+#  登录逻辑
+# ═══════════════════════════════════════
+
+def do_login(target_url: str, username: str, password: str, operator: str) -> bool:
+    """执行登录流程"""
+    log("开始登录流程...")
+
+    auth_url, html, auth_type = fetch_auth_page(target_url)
+    if not auth_url:
+        log("[✗] 未检测到认证页面")
+        return False
+
+    # 标准化运营商
+    op_map = {"移动": "中国移动", "cmcc": "中国移动", "联通": "中国联通", "unicom": "中国联通", "电信": "中国电信", "telecom": "中国电信"}
+    operator = op_map.get(operator, operator)
+
+    if auth_type == "drcom":
+        ok = drcom_login(auth_url, html, username, password, operator)
+    elif auth_type == "ruijie":
+        ok = ruijie_login(auth_url, html, username, password, operator)
+    elif auth_type in ("eportal", "portal", "h3c"):
+        ok = eportal_login(auth_url, html, username, password, operator)
+    else:
+        ok = generic_login(auth_url, html, username, password, operator)
+
+    if ok:
+        log("[✓] 登录成功!")
+    else:
+        log("[✗] 登录失败")
+    return ok
+
+
+def drcom_login(auth_url: str, html: str, username: str, password: str, operator: str) -> bool:
+    log("  [Dr.COM] 登录...")
+    op_val = {"中国移动": "cmcc", "中国联通": "unicom", "中国电信": "telecom"}.get(operator, "cmcc")
+
+    parsed = urlparse(auth_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    post_url = find_action_url(auth_url, html)
+    if not post_url:
+        post_url = base + "/drcom/login"
+
+    fields = extract_hidden_fields(html)
+    uf = find_field(html, ["username", "user", "DDDDD", "userid"], "DDDDD")
+    pf = find_field(html, ["password", "passwd", "upass", "pwd"], "upass")
+    of = find_field(html, ["isp", "auth_type", "is_ld", "operator"], "isp")
+
+    fields[uf] = username
+    fields[pf] = password
+    fields[of] = op_val
+    fields.setdefault("0MKKey", "123456")
+
+    return _post_login(post_url, fields)
+
+
+def ruijie_login(auth_url: str, html: str, username: str, password: str, operator: str) -> bool:
+    log("  [锐捷] 登录...")
+    op_val = {"中国移动": "cmcc", "中国联通": "unicom", "中国电信": "ctcc"}.get(operator, "cmcc")
+
+    parsed = urlparse(auth_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    post_url = find_action_url(auth_url, html) or base + "/cgi-bin/login"
+
+    fields = extract_hidden_fields(html)
+    uf = find_field(html, ["username", "user", "userid"], "username")
+    pf = find_field(html, ["password", "passwd", "pwd"], "password")
+    of = find_field(html, ["isp", "auth_type", "operator"], "isp")
+    fields[uf] = username
+    fields[pf] = password
+    fields[of] = op_val
+
+    return _post_login(post_url, fields)
+
+
+def eportal_login(auth_url: str, html: str, username: str, password: str, operator: str) -> bool:
+    log("  [ePortal] 登录...")
+    op_val = {"中国移动": "cmcc", "中国联通": "unicom", "中国电信": "telecom"}.get(operator, "cmcc")
+
+    parsed = urlparse(auth_url)
+    qs = parse_qs(parsed.query)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    params = {k: v[0] for k, v in qs.items()}
+
+    login_urls = [
+        base + "/eportal/InterFace.do?method=login",
+        base + "/eportal/c/main?method=login",
+        base + "/InterFace.do?method=login",
+        base + "/cgi-bin/login",
+    ]
+
+    login_data = {
+        "userId": username,
+        "password": password,
+        "is_ld": op_val,
+        "service": "WEB",
+        **params,
+    }
+
+    for url in login_urls:
+        try:
+            r = SESSION.post(url, data=login_data, headers={"Content-Type": "application/x-www-form-urlencoded", "Referer": auth_url}, timeout=10)
+            resp = r.text.strip().lower()
+            if any(ok in resp for ok in ["success", "ok", "成功", '"result":"success"']):
+                log("  [✓] ePortal 登录成功")
+                return True
+        except requests.RequestException:
+            continue
+
+    # 兜底：从页面表单提交
+    action = find_action_url(auth_url, html)
+    if action:
+        fields = extract_hidden_fields(html)
+        uf = find_field(html, ["username", "userid", "userId", "user"], "userId")
+        pf = find_field(html, ["password", "passwd", "pwd"], "password")
+        fields[uf] = username
+        fields[pf] = password
+        return _post_login(action, fields)
+    return False
+
+
+def generic_login(auth_url: str, html: str, username: str, password: str, operator: str) -> bool:
+    log("  [通用] 尝试通用登录...")
+
+    post_url = find_action_url(auth_url, html)
+    if not post_url:
+        parsed = urlparse(auth_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        for p in ["/login", "/api/login", "/auth/login", "/cgi-bin/login"]:
+            try:
+                r = SESSION.post(base + p, data={"user": username, "pass": password}, timeout=5)
+                if r.status_code == 200 and len(r.text) < 500:
+                    post_url = base + p
+                    break
+            except requests.RequestException:
+                continue
+
+    if not post_url:
+        log("  [✗] 无法确定登录地址")
+        return False
+
+    fields = extract_hidden_fields(html)
+    uf = find_field(html, ["username", "user", "userid", "account", "DDDDD", "name"], "username")
+    pf = find_field(html, ["password", "passwd", "pwd", "upass"], "password")
+    of = find_field(html, ["isp", "auth_type", "is_ld", "operator"], "isp")
+    fields[uf] = username
+    fields[pf] = password
+    op_val = {"中国移动": "cmcc", "中国联通": "unicom", "中国电信": "telecom"}.get(operator, "cmcc")
+    fields[of] = op_val
+    fields.setdefault("0MKKey", "123456")
+
+    return _post_login(post_url, fields)
+
+
+def _post_login(url: str, data: dict) -> bool:
+    """发送登录POST请求并检查结果"""
+    for attempt in range(3):
+        try:
+            r = SESSION.post(url, data=data, timeout=10)
+            resp = r.text.strip().lower()
+            log(f"  POST {url}  -> {r.status_code}")
+            if any(ok in resp for ok in ["success", "ok", "成功"]):
+                return True
+            if "已经登录" in resp or "已在线" in resp or "already" in resp:
+                return True
+            # JSON 格式成功
+            if resp.startswith("{"):
+                try:
+                    j = json.loads(r.text)
+                    if j.get("result") in (1, "1", "success") or j.get("status") in (0, "0"):
+                        return True
+                except json.JSONDecodeError:
+                    pass
+            if attempt < 2:
+                time.sleep(2)
+        except requests.RequestException as e:
+            log(f"  [!] 请求异常: {e}")
+            if attempt < 2:
+                time.sleep(3)
+    return False
+
+
+# ═══════════════════════════════════════
+#  主逻辑
+# ═══════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="校园网自动登录 & 保持在线工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+示例:
+  %(prog)s                          # 使用配置文件或默认账号登录
+  %(prog)s --daemon                 # 保持在线模式，每60秒检测一次
+  %(prog)s --daemon --interval 30   # 每30秒检测一次
+  %(prog)s --username 2412410023 --password xxxxxx
+  %(prog)s --install-startup        # 添加到Windows开机启动
+""")
+    parser.add_argument("--username", help="校园网账号")
+    parser.add_argument("--password", help="校园网密码")
+    parser.add_argument("--url", default=DEFAULT_AUTH_URL, help=f"认证页面URL (默认: {DEFAULT_AUTH_URL})")
+    parser.add_argument("--operator", default="中国移动", choices=["中国移动", "中国联通", "中国电信", "cmcc", "unicom", "telecom"], help="运营商 (默认: 中国移动)")
+    parser.add_argument("--daemon", "-d", action="store_true", help="保持在线模式：定时检测，断线自动重连")
+    parser.add_argument("--interval", "-i", type=int, default=60, help="检测间隔（秒）(默认: 60)")
+    parser.add_argument("--install-startup", action="store_true", help="添加到Windows开机启动")
+    parser.add_argument("--once", action="store_true", help="仅登录一次，不循环检测")
+
+    args = parser.parse_args()
+
+    # ── 加载/合并配置 ──
+    cfg = load_config()
+    if args.username: cfg["username"] = args.username
+    if args.password: cfg["password"] = args.password
+    if args.url: cfg["auth_url"] = args.url
+    if args.operator: cfg["operator"] = args.operator
+    if args.interval: cfg["check_interval"] = args.interval
+    save_config(cfg)  # 保存回配置文件，方便下次使用
+
+    username = cfg["username"]
+    password = cfg["password"]
+    target = cfg["auth_url"]
+    operator = cfg["operator"]
+    interval = cfg["check_interval"]
+
+    if not username:
+        log("[✗] 未填写账号！请使用 --username 参数或编辑 campus_config.json")
+        sys.exit(1)
+
+    # ── 安装开机启动 ──
+    if args.install_startup:
+        install_startup()
+        return
+
+    # ── 显示信息 ──
+    log("=" * 45)
+    log("  校园网自动登录 & 保持在线")
+    log("=" * 45)
+    log(f"  账号: {username}")
+    log(f"  认证页: {target}")
+    log(f"  运营商: {operator}")
+    log(f"  模式: {'保持在线(守护)' if args.daemon else '单次登录'}")
+    log("=" * 45)
+
+    # ── 主循环 ──
+    while True:
+        if is_online():
+            log("[✓] 网络已连接")
+        else:
+            log("[!] 网络未连接，尝试登录...")
+            do_login(target, username, password, operator)
+            time.sleep(3)
+            if is_online():
+                log("[✓] 网络已恢复")
+            else:
+                log("[✗] 登录后仍未连通，将在下一轮重试")
+
+        if not args.daemon:
+            break
+        time.sleep(interval)
+
+
+# ═══════════════════════════════════════
+#  Windows 开机启动
+# ═══════════════════════════════════════
+
+def install_startup():
+    """创建开机启动快捷方式 (VBScript)"""
+    script_path = os.path.abspath(__file__)
+    startup_dir = os.path.join(os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+    vbs_path = os.path.join(startup_dir, "CampusNetLogin.vbs")
+    vbs_content = f"""CreateObject("WScript.Shell").Run "{sys.executable} \\\"{script_path}\\\" --daemon --interval 60", 0, False
+"""
+    with open(vbs_path, "w", encoding="utf-8") as f:
+        f.write(vbs_content)
+    log(f"[✓] 开机启动已添加: {vbs_path}")
+    log("下次开机后会自动运行校园网保持在线")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("\n用户取消")
+        sys.exit(0)

@@ -1,0 +1,50 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "北京 - 实习",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/招聘/crawler.py",
+            "args": ["-c", "北京", "-k", "实习"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "上海 - 人工智能",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/招聘/crawler.py",
+            "args": ["-c", "上海", "-k", "人工智能"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "苏州 - 实习",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/招聘/crawler.py",
+            "args": ["-c", "苏州", "-k", "实习"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "深圳 - 游戏",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/招聘/crawler.py",
+            "args": ["-c", "深圳", "-k", "游戏"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "杭州 - Java",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/招聘/crawler.py",
+            "args": ["-c", "杭州", "-k", "Java"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

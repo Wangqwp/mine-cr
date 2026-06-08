@@ -1,0 +1,8 @@
+{
+  "username": "2412410023",
+  "password": "070121wang",
+  "auth_url": "http://10.9.1.3",
+  "operator": "中国移动",
+  "check_interval": 60,
+  "timeout": 10
+}

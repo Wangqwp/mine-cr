@@ -1,0 +1,7 @@
+{
+  "id": "my-dog",
+  "displayName": "My Dog",
+  "description": "My real dog photo",
+  "spritesheetPath": "spritesheet.webp",
+  "version": 1
+}
